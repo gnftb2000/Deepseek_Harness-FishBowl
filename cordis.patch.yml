@@ -1,0 +1,27 @@
+# 鱼缸 / Fishbowl · bundle patch
+#
+# 安装后，改配置请覆盖 profile 的 cordis.patch.yml 里同一行（id: fishbowl），
+# 或直接用设置面板「鱼缸」，不要改插件包里的这个文件。
+- insert:
+    - id: fishbowl
+      name: dsh-fishbowl
+      config:
+        # persona 对应 ~/.dsh/persona/<persona>/
+        persona: example
+        # 默认按工作区接管；改成 global 就是所有工作区都接管
+        scope: workspace
+        # 填你想接管的工作区绝对路径；留空 = 先不接管任何工作区
+        enabledWorkspaces: []
+        # 未单独配置的工作区用什么模式：full（完整）/ costume（只带 Soul）/ off
+        defaultMode: full
+        injectSoul: true
+        journalEnabled: true
+        handoffEnabled: true
+        recallEnabled: true
+        maxRecall: 3
+        # 自动整理 + 大模型 curator + 本地 git 版本化
+        autoConsolidate: true
+        curatorUseLlm: true
+        decayEnabled: true
+        weeklyReport: true
+        gitEnabled: true

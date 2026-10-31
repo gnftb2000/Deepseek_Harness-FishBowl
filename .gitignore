@@ -1,0 +1,66 @@
+# ============================================================
+# 鱼缸 / Fishbowl · 不该进仓库的东西
+# 原则：仓库只放「源码 + 资源 + 测试 + 文档」；运行时数据、本机配置、密钥、构建产物都不进。
+# ============================================================
+
+# ---- macOS / Windows 系统垃圾 ----
+.DS_Store
+**/.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.iml
+.fleet/
+
+# ---- 依赖与构建产物 ----
+node_modules/
+.pnpm-store/
+dist/
+build/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# ---- 日志 / 临时 / 备份 ----
+*.log
+*.tmp-*
+*.bak
+*.unparsed-*
+.cache/
+
+# ---- 密钥 / 本地环境 ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials*
+*.secret
+config.local.*
+
+# ---- 鱼缸 persona 运行时数据 ----
+# 正常都在 ~/.dsh/persona/<persona>/，绝不从那里拷进仓库
+persona/
+journal/
+reports/
+handoff/
+state.json
+overrides.json
+config.json
+.remembered-migrated
+fishbowl-export-*/
+
+# ---- 本地测试 / 导出 / 临时目录 ----
+导出测试/
+test-output/
+
+# ---- 大文件 / 归档包 ----
+*.zip
+*.tar.gz
+*.dmg
+*.mp4
