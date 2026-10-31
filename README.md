@@ -17,6 +17,7 @@
 - **版本化**：记忆目录自带本地 git（无远端），每次改动一版，可看历史、可回退。
 - **搬家**：导出记忆包到你选的文件夹；从旧插件（dsh-auto-memory / dsh-mnemon / SurfCore）或旧会话里提炼记忆，先入草稿/待审。
 - **隐私**：只存本机；落盘前脱敏（路径 / 密钥 / 邮箱 / uid）；不写工具调用流水；`off` 工作区完全不碰。
+- **从 mem0 借鉴的细节**：绝对时间锚定（「上个月」→具体日期）、自包含陈述、提取时对照现有记忆、确定性去重兜底；但不照搬「只增不改」——我们用 safe 自动处理 + 人审 + git 可回滚。
 
 ## 安装
 
@@ -54,6 +55,8 @@
     decayEnabled: true               # 旧记忆降权
     weeklyReport: true
     gitEnabled: true                 # 本地 git 版本化
+    conflictAutoMode: safe           # 冲突自动处理：off / safe / balanced
+    conflictAutoMinConfidence: 0.85
 ```
 
 ## 命令
@@ -70,6 +73,7 @@
 | `/persona off` / `on` | 本会话关闭 / 恢复（持久化） |
 | `/persona consolidate [dry]` | 立即整理（dry = 只预览，不落盘、不调模型） |
 | `/persona review` / `approve [id|all]` / `reject [id|all]` | 审核队列 |
+| `/persona auto` / `undo-auto <id>` | 看最近自动处理的冲突动作 / 撤销一条 |
 | `/persona health` / `report` | 身份体检 / 最新整理报告 |
 | `/persona log` / `rollback <sha>` | 本地版本历史 / 回退记忆文件 |
 | `/persona mine list` / `mine <id>` | 列可提炼的旧会话 / 提炼一段 → 全部进待审 |
@@ -108,13 +112,13 @@ MEMORY.md               渲染索引（只指针，不重复正文）
 ## 开发与测试
 
 ```sh
-node --test test/m1.test.mjs test/m15.test.mjs test/m2.test.mjs test/m3.test.mjs
+node --test test/m1.test.mjs test/m15.test.mjs test/m2.test.mjs test/m3.test.mjs test/m4.test.mjs
 ```
 
 ## 已知限制
 
-- 召回是关键词（中文 bigram），不是向量；同义改写召回弱。
-- 整理衰减是按记忆类型的半衰期近似，不理解语义冲突。
+- 召回是关键词（中文 bigram），不是向量；同义改写召回弱。别名/实体索引是下一步，向量检索等记忆规模/失败率触发后再做。
+- 整理衰减是按记忆类型的半衰期近似；语义冲突由大模型判断，可能误判——所以 safe 只自动处理低风险动作，且全部可撤销；身份/称呼/边界永远人工。
 - 旧会话提炼一次只处理一段，转录有长度上限；导入是「尽力解析」，复杂私有格式会漏。
 - 跨机器迁移请用「导出记忆包」；`.git` 历史不会随包走。
 

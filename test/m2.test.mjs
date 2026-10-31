@@ -316,7 +316,7 @@ function createHarness({ home, rawConfig, llm }) {
   return { ctx, commands, routes, sessions, callRoute }
 }
 
-test('apply M2：curator 全链路（fake llm）+ 审核 API + git commit', async () => {
+test('apply：curator 全链路（fake llm）+ 审核 API + git commit', async () => {
   const root = mkdtempSync(join(tmpdir(), 'fishbowl-m2-apply-'))
   const home = join(root, 'home')
   const workspace = join(root, 'workspace')
@@ -415,7 +415,7 @@ test('apply M2：curator 全链路（fake llm）+ 审核 API + git commit', asyn
 })
 
 // ---------------------------------------------------------------------------
-// M2.5：pin 保护 + 审核旧值快照
+// pin 保护 + 审核旧值快照
 // ---------------------------------------------------------------------------
 
 test('pin：钉住的条目不合并、不衰减', () => {
@@ -450,6 +450,7 @@ test('curator：修改类提议带旧值快照（diff 预览）', () => {
         { op: 'forget', kind: 'preference', target_id: 'rel_diff', reason: '用户说记错了' },
       ],
       now: new Date('2026-10-30T00:00:00.000Z'),
+      mode: 'off',
     })
     assert.equal(plan.queueItems.length, 2)
     assert.equal(plan.queueItems[0].target_snapshot.statement, '用户喜欢冰美式')
@@ -461,7 +462,7 @@ test('curator：修改类提议带旧值快照（diff 预览）', () => {
   }
 })
 
-test('apply M2.5：pin API / 钉住后审核与遗忘被拦 / 钉住条目不衰减', async () => {
+test('apply：pin API / 钉住后审核与遗忘被拦 / 钉住条目不衰减', async () => {
   const root = mkdtempSync(join(tmpdir(), 'fishbowl-m25-'))
   const home = join(root, 'home')
   const workspace = join(root, 'workspace')

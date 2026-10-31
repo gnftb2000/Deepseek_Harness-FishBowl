@@ -396,6 +396,27 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const undoAuto = async (id) => {
+        setM2Busy(id)
+        setM2Msg(null)
+        try {
+          const res = await fetch('/api/fishbowl/auto-log', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ id, action: 'undo' }),
+          })
+          const data = await res.json()
+          if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+          refreshData(data)
+          setM2Msg({ ok: true, text: `已撤销 ${id}（改动已回滚，git 有记录）` })
+        } catch (error) {
+          setM2Msg({ ok: false, text: `撤销失败：${String(error?.message || error)}` })
+        } finally {
+          setM2Busy('')
+        }
+      }
+
       const togglePin = async (id, pinned) => {
         setM2Busy(id)
         setM2Msg(null)
@@ -421,7 +442,7 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'fb-head' },
         h('div', { className: 'fb-title' }, '鱼缸 / Fishbowl'),
-        h('div', { className: 'fb-sub' }, state.data ? `v${asText(state.data.version)} · ${asText(state.data.stage)}` : 'v0.3.0'),
+        h('div', { className: 'fb-sub' }, state.data ? `v${asText(state.data.version)} · ${asText(state.data.stage)}` : 'v0.3.1'),
         h('button', { className: 'fb-btn', onClick: load, type: 'button' }, '刷新'),
       )
 
@@ -462,6 +483,7 @@ window.__ModuleLoader__.load({
       const health = data.health || { score: null, checks: [] }
       const curator = data.curator || {}
       const m3Info = data.m3Info || {}
+      const conflict = data.conflict || { mode: 'safe', threshold: 0.85, autoActions: [], stats7d: {} }
       const globalScope = effective.scope === 'global'
       const workspaces = effective.enabledWorkspaces || []
       const modes = effective.workspaceModes || {}
@@ -618,6 +640,19 @@ window.__ModuleLoader__.load({
             ),
             '多久自动整理一次；默认 24 小时。到点后下次启动或保存配置时补跑。',
           ),
+          Row(
+            '冲突自动处理',
+            Select(
+              form.conflictAutoMode,
+              [
+                { value: 'off', label: 'off · 全部人工审核' },
+                { value: 'safe', label: 'safe · 低风险自动（推荐）' },
+                { value: 'balanced', label: 'balanced · 再加高置信取代' },
+              ],
+              (value) => update('conflictAutoMode', value),
+            ),
+            '整理时发现记忆互相矛盾：safe 自动处理「去重/补细节/新增约束/明确纠错」，称呼、边界、低置信仍进待审；balanced 再把高置信「新事实取代旧事实」也自动处理。自动动作都可撤销。',
+          ),
           h(
             'div',
             { className: 'fb-actions' },
@@ -699,7 +734,7 @@ window.__ModuleLoader__.load({
                   h(
                     'li',
                     { key: item.id },
-                    h('span', { className: 'fb-kind' }, `${item.op}/${item.kind}`),
+                    h('span', { className: 'fb-kind' }, `${item.relation ? `${item.relation} · ` : ''}${item.op}/${item.kind}`),
                     `${item.id} · `,
                     item.target_snapshot
                       ? h(
@@ -812,6 +847,47 @@ window.__ModuleLoader__.load({
         ),
         h(
           'div',
+          { className: 'fb-card' },
+          h(
+            'div',
+            { className: 'fb-form-head' },
+            h('strong', null, '冲突与自动处理'),
+            h(
+              'span',
+              { className: 'fb-source' },
+              `模式 ${conflict.mode || 'safe'} · 阈值 ${conflict.threshold ?? 0.85} · 近 7 天 ${Object.entries(conflict.stats7d || {}).map(([key, value]) => `${key} ${value}`).join(' / ') || '无'}`,
+            ),
+          ),
+          h(
+            'div',
+            { className: 'fb-field-hint' },
+            '自动处理 = 整理发现记忆矛盾时，低风险改动直接应用（去重、补细节、新增约束、明确纠错），并在这里留记录；称呼/边界/低置信仍进「待审」。每一条都能撤销。',
+          ),
+          (conflict.autoActions || []).length === 0
+            ? h('div', { className: 'fb-empty' }, '还没有自动处理记录。')
+            : h(
+                'ul',
+                { className: 'fb-list' },
+                (conflict.autoActions || []).map((action) =>
+                  h(
+                    'li',
+                    { key: action.id },
+                    h('span', { className: 'fb-kind' }, action.relation),
+                    `${action.id} · ${action.status === 'undone' ? '已撤销' : '生效中'} · ${action.statement}`,
+                    action.targetStatement ? h('div', { className: 'fb-field-hint' }, `旧：${action.targetStatement}`) : null,
+                    action.status === 'undone'
+                      ? null
+                      : h(
+                          'button',
+                          { className: 'fb-mini', type: 'button', disabled: Boolean(m2Busy), onClick: () => undoAuto(action.id) },
+                          '撤销',
+                        ),
+                  ),
+                ),
+              ),
+        ),
+        h(
+          'div',
           { className: 'fb-grid' },
           Stat(rel.active ?? 0, 'active 记忆'),
           Stat(rel.draft ?? 0, '草稿待审'),
@@ -880,7 +956,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'fb-foot' },
-          '命令：/remember · /why · /forget · /pin · /unpin · /persona off|on|consolidate|review|approve|reject|mine|export|import-memory|health|report|log|rollback。Soul 只能由用户改。',
+          '命令：/remember · /why · /forget · /pin · /unpin · /persona off|on|consolidate|review|approve|reject|auto|undo-auto|mine|export|import-memory|health|report|log|rollback。Soul 只能由用户改。',
         ),
       )
     }

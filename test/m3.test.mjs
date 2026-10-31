@@ -263,7 +263,7 @@ function createHarness({ home, rawConfig, llm, sessionQuery }) {
   return { ctx, commands, routes, sessions, callRoute }
 }
 
-test('apply M3：mine / export / import-memory / 成本门', async () => {
+test('apply：mine / export / import-memory / 成本门', async () => {
   const root = mkdtempSync(join(tmpdir(), 'fishbowl-m3-apply-'))
   const home = join(root, 'home')
   const workspace = join(root, 'workspace')

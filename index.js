@@ -1,18 +1,21 @@
 /**
  * dsh-fishbowl / 鱼缸 —— Host 半端
  * ============================================================================
- * 它做什么：
- *   1. 身份注入：agent/created 时按工作区作用域注册 systemPrompt.section（Soul / 关系摘要 / 交接条）。
- *   2. 每轮捕获：journal（脱敏 WAL）、显式「记住：……」、候选标记、handoff。
- *   3. 动态召回：当前输入 → 关键词 top-k 旧记忆，注入动态 context（不是指令，是回忆）。
- *   4. 整理：规则 consolidation（去重/合并/衰减/报告/体检）+ 可选大模型 curator（只提议）。
- *   5. 审核：关系类改动先进 review 队列，用户通过才写入；Soul 永不自动改。
- *   6. 版本化：persona 目录本地 git，可看历史、可回滚。
- *   7. 搬家：旧会话提炼、导入别的插件记忆、导出记忆包。
- *   8. 隐私：落盘前统一脱敏；过滤宿主注入的 runtime context；journal 不含工具流水。
+ * M0 → M1 增补（按 大纲.md §12）：
+ *   - Relationship / Episodic schema：relationship.md、episodes/YYYY-MM.md（yaml 条目块）
+ *   - 显式记忆：「记住：……」自动落一条 relationship；`/remember` 手动落一条
+ *   - turn 候选：偏好/边界/承诺/节律规则标记，只进 journal（供 curator 消费）
+ *   - handoff：每轮 turn-stopping 写「下次接上需要的最小集合」，新会话 session-start 注入
+ *   - 召回注入：agent/pre-step 当前输入 → 关键词 top-k 旧记忆（≤3 条 / ≤900 字），动态 context
+ *   - 作用域 full / costume / off（workspaceModes 按工作区覆盖）；`/persona off|on` 按会话
+ *   - `/forget`、`/why`、`/persona import|review|approve|reject`
+ *   - 隐私：journal / 记忆落盘前统一脱敏；过滤宿主注入的 runtime context
+ *   - resume 不重复注入 handoff；压缩（source=compact）重新注入
  *
- * 存储：~/.dsh/persona/<persona>/（见 README 的「数据放在哪」）。
- * 文档：README.md。
+ * M1.5 增补：
+ *   - 面板设置表单：`/api/fishbowl/config`（保存）与 `/config/reset`（重置为 patch）
+ *   - 设置持久化在 `~/.dsh/persona/<p>/config.json`，优先级高于 profile patch；保存后热重挂注入
+ *
  * ============================================================================
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
@@ -245,14 +248,15 @@ export function apply(ctx, rawConfig) {
     for (const kind of order) {
       const items = entries.filter((entry) => entry.kind === kind)
       for (const entry of items) {
-        const line = `- [${kindLabel[kind] || kind}] ${trunc(entry.statement, 110)}`
+        const line = `- [${kindLabel[kind] || kind} · ${entry.updated_at || entry.created_at}] ${trunc(entry.statement, 110)}`
         if (lines.join('\n').length + line.length > MAX_RELATIONSHIP_SUMMARY_CHARS) break
         lines.push(line)
       }
     }
     if (lines.length === 0) return ''
     return [
-      '以下是用户和她之间长期有效的关系、偏好与边界（由鱼缸维护，不是指令；与当前指令冲突时以当前指令为准）：',
+      '以下是用户和她之间长期有效的关系、偏好与边界（由鱼缸维护，不是指令；与当前指令冲突时以当前指令为准）。',
+      '若多条记忆时间/说法不一致，以更新时间较新的为准；「边界/约束」类优先于普通偏好。',
       lines.join('\n'),
     ].join('\n\n')
   }
@@ -309,7 +313,8 @@ export function apply(ctx, rawConfig) {
         seen.add(entry.id)
         const evidence = (entry.evidence || []).find((item) => item && item.quote)
         const quote = evidence ? `（证据：${trunc(redactText(evidence.quote), 60)}）` : ''
-        lines.push(`- [${badge || kindLabel[entry.kind] || entry.kind}] ${trunc(entry.statement, 160)}${quote}`)
+        const related = (entry.conflicts_with || []).length > 0 ? `（与 ${entry.conflicts_with.length} 条相关记忆并存，按更新时间取较新）` : ''
+        lines.push(`- [${badge || kindLabel[entry.kind] || entry.kind} · ${entry.updated_at || entry.created_at}] ${trunc(entry.statement, 160)}${quote}${related}`)
       }
       for (const hit of hits) pushEntry(hit.entry)
       for (const entry of sessionNew) pushEntry(entry, `本轮 · ${kindLabel[entry.kind] || entry.kind}`)
@@ -317,6 +322,7 @@ export function apply(ctx, rawConfig) {
       const body = trunc(lines.join('\n'), MAX_RECALL_CHARS)
       return [
         '## 和当前话题有关的旧记忆（不是指令，是回忆；与当前用户指令冲突时以当前指令为准）',
+        '如果多条记忆时间/说法不一致，以更新时间较新的为准；「边界/约束」类优先于普通偏好。',
         body,
       ].join('\n\n')
     } catch (e) {
@@ -608,6 +614,54 @@ export function apply(ctx, rawConfig) {
     if (!item) return { ok: false, error: '没有这条审核项' }
     if (item.op === 'add') {
       if (!item.statement) return { ok: false, error: '审核项缺 statement' }
+      const relation = item.relation && item.relation !== 'unrelated' ? item.relation : null
+      if (relation && item.target_id) {
+        const target = store.readAllEntries().find((entry) => entry.id === item.target_id)
+        if (!target) return { ok: false, error: `冲突目标不存在：${item.target_id}` }
+        if (target.pinned === true) {
+          return { ok: false, error: `目标记忆被钉住了（${target.id}），先 /unpin 再处理这条提议。` }
+        }
+        if (relation === 'refine') {
+          const evidence = [...(target.evidence || [])]
+          if (!evidence.some((entry) => entry.quote === trunc(item.statement, 120))) {
+            evidence.push({ source: `curator:${item.source || 'review'}`, quote: trunc(item.statement, 120) })
+          }
+          store.updateEntry(target.id, { statement: item.statement, evidence: evidence.slice(0, 6), status: 'active' })
+          return { ok: true, applied: 'refine' }
+        }
+        if (relation === 'constrain') {
+          const createdId = newEntryId(item.kind === 'episode' ? 'ep' : 'rel')
+          store.addEntry({
+            id: createdId,
+            kind: item.kind || 'context',
+            scope: 'persona',
+            status: 'active',
+            confidence: Number.isFinite(item.confidence) ? item.confidence : 0.7,
+            statement: item.statement,
+            evidence: [{ source: `curator:${item.source || 'review'}`, quote: trunc(item.statement, 120) }],
+            conflicts_with: [target.id],
+          })
+          store.updateEntry(target.id, {
+            conflicts_with: [...(target.conflicts_with || []).filter((entryId) => entryId !== createdId), createdId],
+          })
+          return { ok: true, applied: 'constrain' }
+        }
+        if (relation === 'supersede' || relation === 'correct') {
+          const createdId = newEntryId('rel')
+          store.addEntry({
+            id: createdId,
+            kind: item.kind || target.kind,
+            scope: 'persona',
+            status: 'active',
+            confidence: Number.isFinite(item.confidence) ? item.confidence : 0.7,
+            statement: item.statement,
+            supersedes: [target.id],
+            evidence: [{ source: `curator:${item.source || 'review'}`, quote: trunc(item.statement, 120) }],
+          })
+          store.updateEntry(target.id, { status: 'superseded' })
+          return { ok: true, applied: relation }
+        }
+      }
       store.addEntry({
         id: newEntryId(item.kind === 'episode' ? 'ep' : 'rel'),
         kind: item.kind || 'preference',
@@ -634,6 +688,19 @@ export function apply(ctx, rawConfig) {
       return { ok: true, applied: 'update' }
     }
     if (item.op === 'supersede') {
+      if (item.statement) {
+        const createdId = newEntryId('rel')
+        store.addEntry({
+          id: createdId,
+          kind: item.kind || target.kind,
+          scope: 'persona',
+          status: 'active',
+          confidence: Number.isFinite(item.confidence) ? item.confidence : 0.7,
+          statement: item.statement,
+          supersedes: [target.id],
+          evidence: [{ source: `curator:${item.source || 'review'}`, quote: trunc(item.statement, 120) }],
+        })
+      }
       store.updateEntry(target.id, { status: 'superseded' })
       return { ok: true, applied: 'supersede' }
     }
@@ -642,6 +709,153 @@ export function apply(ctx, rawConfig) {
       return { ok: true, applied: 'forget' }
     }
     return { ok: false, error: `未知审核操作：${item.op}` }
+  }
+
+  // --- 冲突自动处理（safe/balanced） ----------------------------------------
+  const newAutoId = () => `auto_${dayKey().replace(/-/g, '')}_${Math.random().toString(36).slice(2, 6)}`
+
+  /** 应用一条自动冲突动作，写 auto-log（带撤销所需的反向信息）。 */
+  const applyAutoConflict = (item) => {
+    const target = item.target_id ? store.readAllEntries().find((entry) => entry.id === item.target_id) : null
+    const base = {
+      id: newAutoId(),
+      at: nowIso(),
+      relation: item.relation,
+      kind: item.kind,
+      statement: trunc(item.statement, 300),
+      targetId: target?.id,
+      target_snapshot: item.target_snapshot || null,
+      confidence: item.confidence,
+      reason: item.reason || '',
+      mode: cfg.conflictAutoMode,
+      status: 'active',
+    }
+    if (item.relation === 'refine' && target) {
+      const before = { statement: target.statement, kind: target.kind, evidence: (target.evidence || []).slice(0, 6) }
+      const evidence = [...(target.evidence || [])]
+      if (!evidence.some((entry) => entry.quote === trunc(item.statement, 120))) {
+        evidence.push({ source: 'curator:auto', quote: trunc(item.statement, 120) })
+      }
+      store.updateEntry(target.id, {
+        statement: item.statement,
+        ...(item.kind ? { kind: item.kind } : {}),
+        ...(Number.isFinite(item.confidence) ? { confidence: item.confidence } : {}),
+        evidence: evidence.slice(0, 6),
+      })
+      return store.appendAutoAction({ ...base, before })
+    }
+    if (item.relation === 'constrain') {
+      const createdId = newEntryId(item.kind === 'episode' ? 'ep' : 'rel')
+      store.addEntry({
+        id: createdId,
+        kind: item.kind,
+        scope: 'persona',
+        status: 'active',
+        confidence: item.confidence,
+        statement: item.statement,
+        evidence: [{ source: 'curator:auto', quote: trunc(item.statement, 120) }],
+        conflicts_with: target ? [target.id] : [],
+      })
+      if (target) {
+        const linked = [...(target.conflicts_with || []).filter((id) => id !== createdId), createdId]
+        store.updateEntry(target.id, { conflicts_with: linked })
+      }
+      return store.appendAutoAction({ ...base, createdId })
+    }
+    if ((item.relation === 'correct' || item.relation === 'supersede') && target) {
+      const before = { status: target.status, statement: target.statement }
+      const createdId = newEntryId('rel')
+      store.addEntry({
+        id: createdId,
+        kind: item.kind,
+        scope: 'persona',
+        status: 'active',
+        confidence: item.confidence,
+        statement: item.statement,
+        supersedes: [target.id],
+        evidence: [{ source: 'curator:auto', quote: trunc(item.statement, 120) }],
+      })
+      store.updateEntry(target.id, { status: 'superseded' })
+      return store.appendAutoAction({ ...base, createdId, before })
+    }
+    return null
+  }
+
+  const isoWeekOf = (date = new Date()) => {
+    const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+    const day = d.getUTCDay() || 7
+    d.setUTCDate(d.getUTCDate() + 4 - day)
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+    const week = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
+    return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`
+  }
+
+  /** 把「本周自动处理」小节同步进周报（存在才更新，不额外创建文件）。 */
+  const syncWeeklyAutoSection = () => {
+    try {
+      const week = isoWeekOf(new Date())
+      const reportName = `${week}.md`
+      if (!store.listReports().includes(reportName)) return null
+      const relative = `reports/${reportName}`
+      const existing = store.readReport(relative)
+      const marker = '## 自动处理（本周，自动生成）'
+      const base = existing.includes(marker) ? existing.slice(0, existing.indexOf(marker)) : existing
+      const actions = store.readAutoActions({ sinceMs: Date.now() - 7 * 86400000, limit: 500 })
+      const counts = actions.reduce((acc, action) => {
+        const key = action.status === 'undone' ? '已撤销' : action.relation
+        acc[key] = (acc[key] || 0) + 1
+        return acc
+      }, {})
+      const section = [
+        marker,
+        '',
+        `- 近 7 天自动处理：${Object.entries(counts).map(([key, value]) => `${key} ${value}`).join(' / ') || '无'}`,
+        '- 明细与撤销：设置 → 鱼缸 →「冲突与自动处理」，或 `/persona auto`',
+        '',
+      ].join('\n')
+      store.writeReport(reportName, `${base.trimEnd()}\n\n${section}`)
+      return relative
+    } catch (e) {
+      log('同步周报自动处理小节失败', e?.message ?? e)
+      return null
+    }
+  }
+
+  /** 撤销一条自动处理（反向操作 + git commit）。 */
+  const undoAutoAction = (id) => {
+    const action = store.findAutoAction(id)
+    if (!action) return { ok: false, error: `没有这条自动处理：${id}` }
+    if (action.status !== 'active') return { ok: false, error: '这条已经撤销过了' }
+    try {
+      if (action.relation === 'refine' && action.targetId && action.before) {
+        store.updateEntry(action.targetId, {
+          statement: action.before.statement,
+          ...(action.before.kind ? { kind: action.before.kind } : {}),
+          evidence: action.before.evidence,
+        })
+      } else if (action.relation === 'constrain') {
+        if (action.createdId) store.updateEntry(action.createdId, { status: 'forgotten' })
+        if (action.targetId) {
+          const target = store.readAllEntries().find((entry) => entry.id === action.targetId)
+          if (target) {
+            store.updateEntry(target.id, {
+              conflicts_with: (target.conflicts_with || []).filter((entryId) => entryId !== action.createdId),
+            })
+          }
+        }
+      } else if ((action.relation === 'correct' || action.relation === 'supersede') && action.targetId) {
+        if (action.createdId) store.updateEntry(action.createdId, { status: 'forgotten' })
+        store.updateEntry(action.targetId, { status: action.before?.status || 'active' })
+      } else {
+        return { ok: false, error: '这条动作没有可撤销的反向操作' }
+      }
+      store.updateAutoAction(id, { status: 'undone', undoneAt: nowIso() })
+      writeMemoryIndex()
+      commitMemory(`undo-auto ${id}`)
+      return { ok: true, action: store.findAutoAction(id) }
+    } catch (e) {
+      return { ok: false, error: e?.message ?? String(e) }
+    }
   }
 
   /**
@@ -667,7 +881,7 @@ export function apply(ctx, rawConfig) {
           journal: (rule.slices || []).flatMap((slice) => slice.entries),
           queue: store.pendingQueue(),
         })
-        const call = await callCuratorModel({ llm: llm, selection, input, log })
+        const call = await callCuratorModel({ llm: llm, selection, input, log, maxTokens: 2000 })
         if (!call.ok) {
           curator = { status: 'error', error: call.error, ops: 0, queued: 0, episodes: 0, skipped: 0, ...selection }
         } else {
@@ -679,6 +893,7 @@ export function apply(ctx, rawConfig) {
             const retry = await callCuratorModel({
               llm: llm,
               selection,
+              maxTokens: 3000,
               input: {
                 ...input,
                 correction: `上一次输出不合法：${validated.error}。请只输出合法 JSON，ops 里每条 add 必须带 kind（preference/boundary/ritual/promise/context/open_question/episode）；update/supersede/forget 必须带 target_id。`,
@@ -705,17 +920,37 @@ export function apply(ctx, rawConfig) {
           } else if (validated.value.noop) {
             curator = { status: 'noop', ops: 0, queued: 0, episodes: 0, skipped: 0, ...selection }
           } else {
-            const plan = planCuratorOps({ store, ops: validated.value.ops, now: new Date() })
+            const plan = planCuratorOps({
+              store,
+              ops: validated.value.ops,
+              now: new Date(),
+              mode: cfg.conflictAutoMode,
+              threshold: cfg.conflictAutoMinConfidence,
+            })
             for (const entry of plan.episodes) {
               store.addEntry({ ...entry, updated_at: entry.created_at })
             }
             if (plan.queueItems.length > 0) store.appendQueueMany(plan.queueItems)
+            const autoApplied = []
+            for (const item of plan.autoItems) {
+              try {
+                const action = applyAutoConflict(item)
+                if (action) autoApplied.push(action)
+              } catch (e) {
+                log('自动处理冲突失败', e?.message ?? e)
+              }
+            }
             curator = {
               status: 'ok',
               ops: validated.value.ops.length,
               queued: plan.queueItems.length,
               episodes: plan.episodes.length,
               skipped: plan.skipped.length,
+              auto: autoApplied.length,
+              autoByRelation: autoApplied.reduce((acc, action) => {
+                acc[action.relation] = (acc[action.relation] || 0) + 1
+                return acc
+              }, {}),
               ...selection,
             }
             if (rule.reportPath) {
@@ -727,6 +962,9 @@ export function apply(ctx, rawConfig) {
                   '',
                   `- 状态：${curator.status}，ops ${curator.ops}，入队列 ${curator.queued}，情节卡 ${curator.episodes}，跳过 ${curator.skipped}`,
                   `- 模型：${selection.provider}/${selection.model}`,
+                  ...(autoApplied.length
+                    ? ['- 自动处理：', ...autoApplied.map((action) => `  - ${action.id} · ${action.relation} · ${trunc(action.statement, 80)}（可撤销）`)]
+                    : []),
                   ...(plan.skipped.length ? ['- 跳过原因：', ...plan.skipped.map((reason) => `  - ${reason}`)] : []),
                   '',
                 ].join('\n')
@@ -748,6 +986,7 @@ export function apply(ctx, rawConfig) {
             '## 整理后计数快照',
             '',
             `- active ${countsNow.relationship.active}；待审 ${store.pendingQueue().length}；情节卡 ${countsNow.episodes}；条目总计 ${countsNow.relationship.total}`,
+            `- 本次自动处理 ${curator.auto || 0} 条（safe=${cfg.conflictAutoMode}）；可在面板「冲突与自动处理」撤销`,
             '',
           ].join('\n')
           for (const reportPath of [rule.reportPath, rule.weeklyPath]) {
@@ -762,15 +1001,16 @@ export function apply(ctx, rawConfig) {
           log('计数快照失败', e?.message ?? e)
         }
       }
-      const changed = rule.changed || curator.queued > 0 || curator.episodes > 0
+      const changed = rule.changed || curator.queued > 0 || curator.episodes > 0 || (curator.auto || 0) > 0
       let commit = null
       if (!dryRun && changed) {
         commit = commitMemory(
-          `consolidate ${dayKey()}（queue+${rule.queued} merge+${rule.merged} decay+${rule.decayed}${curator.queued + curator.episodes > 0 ? ` llm+${curator.queued + curator.episodes}` : ''}）`,
+          `consolidate ${dayKey()}（queue+${rule.queued} merge+${rule.merged} decay+${rule.decayed}${curator.queued + curator.episodes > 0 ? ` llm+${curator.queued + curator.episodes}` : ''}${curator.auto ? ` auto+${curator.auto}` : ''}）`,
         )
       }
       if (!dryRun) {
         store.writeState({ lastConsolidateAt: nowIso(), lastCurator: curator })
+        syncWeeklyAutoSection()
         runtimeInfo.consolidation.lastAt = nowIso()
         runtimeInfo.consolidation.lastTrigger = trigger
         writeMemoryIndex()
@@ -926,7 +1166,7 @@ export function apply(ctx, rawConfig) {
         return { ok: true, status: 'noop', ops: 0, queued: 0 }
       }
       const ops = validated.value.ops.slice(0, cfg.mineMaxOps)
-      const plan = planCuratorOps({ store, ops, now: new Date(), autoEpisodes: false })
+      const plan = planCuratorOps({ store, ops, now: new Date(), autoEpisodes: false, mode: 'off' })
       for (const item of plan.queueItems) item.source = `mine:${String(sessionId).slice(0, 8)}`
       if (plan.queueItems.length > 0) store.appendQueueMany(plan.queueItems)
       const reportPath = store.writeReport(
@@ -1207,6 +1447,7 @@ export function apply(ctx, rawConfig) {
           `配置来源：${configSource() === 'panel' ? '面板设置（config.json）' : 'profile patch'}；面板：设置 → 鱼缸`,
           `审核队列：${store.pendingQueue().length} 条待审；最近整理：${store.readState().lastConsolidateAt || '还没整理过'}`,
           `版本：${gitRepo.head() ? `git HEAD ${gitRepo.head()}` : '未启用/无提交'}；体检：${computeHealth({ store }).score} 分`,
+          `冲突自动处理：${cfg.conflictAutoMode}（阈值 ${cfg.conflictAutoMinConfidence}）；/persona auto 看最近自动动作`,
           `旧会话提炼 / 搬家：/persona mine list · /persona export [目录] · /persona import-memory <auto-memory|mnemon|surfcore|md|json> <文件>`,
           `家目录：${personaDir}`,
           '',
@@ -1375,6 +1616,41 @@ export function apply(ctx, rawConfig) {
       return { kind: 'success', text: `最新报告：${latest.file}\n\n${trunc(latest.content, 3000)}` }
     }
 
+    if (subcommand === 'auto') {
+      const actions = store.readAutoActions({ limit: 15 })
+      if (actions.length === 0) {
+        return { kind: 'success', text: `还没有自动处理记录（模式：${cfg.conflictAutoMode}）。` }
+      }
+      const stats = store.readAutoActions({ sinceMs: Date.now() - 7 * 86400000, limit: 500 })
+      const byRelation = stats.reduce((acc, action) => {
+        const key = action.status === 'undone' ? '已撤销' : action.relation
+        acc[key] = (acc[key] || 0) + 1
+        return acc
+      }, {})
+      return {
+        kind: 'success',
+        text: [
+          `冲突自动处理（模式 ${cfg.conflictAutoMode} · 阈值 ${cfg.conflictAutoMinConfidence}）`,
+          `近 7 天：${Object.entries(byRelation).map(([key, value]) => `${key} ${value}`).join(' / ') || '无'}`,
+          '最近动作：',
+          ...actions.map(
+            (action) =>
+              `- ${action.id} · ${action.relation} · ${action.status === 'undone' ? '已撤销' : '生效中'} · ${trunc(action.statement, 80)}`,
+          ),
+          '',
+          '撤销：/persona undo-auto <id>（或面板「冲突与自动处理」）。',
+        ].join('\n'),
+      }
+    }
+
+    if (subcommand === 'undo-auto') {
+      const id = String(rest[0] || '').trim()
+      if (!id) return { kind: 'error', text: '用法：/persona undo-auto <auto 动作 id>' }
+      const result = undoAutoAction(id)
+      if (!result.ok) return { kind: 'error', text: `撤销失败：${result.error}` }
+      return { kind: 'success', text: `已撤销 ${id}（改动已回滚，git 里有记录）。` }
+    }
+
     if (subcommand === 'mine') {
       const arg = String(rest[0] || 'list').trim()
       if (!arg || arg === 'list') {
@@ -1452,7 +1728,7 @@ export function apply(ctx, rawConfig) {
 
     return {
       kind: 'error',
-      text: '用法：/persona [status|off|on|import <文件>|consolidate [dry]|review|approve [id|all]|reject [id|all]|health|report|log|rollback <sha>|mine [list|<id>]|export [目录]|import-memory <格式> <文件>]',
+      text: '用法：/persona [status|off|on|import <文件>|consolidate [dry]|review|approve [id|all]|reject [id|all]|health|report|log|rollback <sha>|mine [list|<id>]|export [父目录]|import-memory <格式> <文件>|auto|undo-auto <id>]',
     }
   }
 
@@ -1636,6 +1912,28 @@ export function apply(ctx, rawConfig) {
       m15: ['settings-form', 'config-file', 'hot-reload', 'reattach-live-agents'],
       m2: ['consolidation', 'curator-llm', 'review-queue', 'decay', 'git-versioning', 'weekly-report', 'identity-health'],
       m3: ['mine-old-sessions', 'import-memory', 'export-bundle', 'curator-cost-gate'],
+      conflict: {
+        mode: cfg.conflictAutoMode,
+        threshold: cfg.conflictAutoMinConfidence,
+        autoActions: store.readAutoActions({ limit: 10 }).map((action) => ({
+          id: action.id,
+          at: action.at,
+          relation: action.relation,
+          kind: action.kind,
+          statement: trunc(action.statement || '', 140),
+          targetId: action.targetId || null,
+          targetStatement: trunc(action.target_snapshot?.statement || '', 140),
+          status: action.status || 'active',
+          mode: action.mode,
+        })),
+        stats7d: store
+          .readAutoActions({ sinceMs: Date.now() - 7 * 86400000, limit: 500 })
+          .reduce((acc, action) => {
+            const key = action.status === 'undone' ? 'undone' : action.relation
+            acc[key] = (acc[key] || 0) + 1
+            return acc
+          }, {}),
+      },
       review: {
         pending: queue.length + drafts.length,
         queue: queue.slice(-10).map((item) => ({
@@ -1645,6 +1943,7 @@ export function apply(ctx, rawConfig) {
           statement: trunc(item.statement || item.target_id || '', 140),
           reason: item.reason,
           source: item.source,
+          relation: item.relation || null,
           target_snapshot: item.target_snapshot
             ? {
                 ...item.target_snapshot,
@@ -1817,6 +2116,26 @@ export function apply(ctx, rawConfig) {
               writeMemoryIndex()
               commitMemory(`${pinned ? 'pin' : 'unpin'} ${id}`)
               sendJson(res, 200, { ...statusPayload(), pinned: { id, pinned } })
+              return
+            }
+            if (req.method === 'POST' && url.pathname === '/api/fishbowl/auto-log') {
+              let body = {}
+              try {
+                body = await readJsonBody(req)
+              } catch {
+                body = {}
+              }
+              const id = String(body?.id || '')
+              if (!id || body?.action !== 'undo') {
+                sendJson(res, 400, { ok: false, error: '需要 id 和 action=undo' })
+                return
+              }
+              const result = undoAutoAction(id)
+              if (!result.ok) {
+                sendJson(res, 400, { ok: false, error: result.error })
+                return
+              }
+              sendJson(res, 200, { ...statusPayload(), undone: result.action })
               return
             }
             if (req.method === 'GET' && url.pathname === '/api/fishbowl/mine') {

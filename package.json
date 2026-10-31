@@ -1,14 +1,16 @@
 {
   "name": "dsh-fishbowl",
-  "version": "0.3.0",
-  "description": "Fishbowl（鱼缸）：给 DSH 里的 AI 角色一个跨会话、跨项目的身份连续性层（Soul 注入 / 记忆整理 / 审核队列 / git 版本化）",
+  "version": "0.3.1",
+  "description": "Fishbowl（鱼缸）：给 DSH 里的 AI 角色一个跨会话、跨项目的身份连续性层（Soul 注入 / 记忆整理 / 语义冲突处理 / 审核队列 / git 版本化）",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
     "ai-persona",
     "long-term-memory",
-    "memory"
+    "memory",
+    "memory-conflict",
+    "ai-companion"
   ],
   "license": "MIT",
   "author": "Fishbowl contributors",

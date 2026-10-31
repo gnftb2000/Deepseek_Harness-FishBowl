@@ -25,3 +25,6 @@
         decayEnabled: true
         weeklyReport: true
         gitEnabled: true
+        # 冲突自动处理：off（全人工）/ safe（低风险自动，推荐）/ balanced（再加高置信取代）
+        conflictAutoMode: safe
+        conflictAutoMinConfidence: 0.85
